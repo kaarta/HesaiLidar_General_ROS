@@ -901,7 +901,7 @@ void PandarGeneral_Internal::ProcessGps(const PandarGPS &gpsMsg) {
   t.tm_isdst = 0;
 
   if (gps_callback_) {
-    gps_callback_(static_cast<double>(mktime(&t) + tz_second_));
+    gps_callback_( gpsMsg.fineTime);
   }
 }
 
@@ -1071,7 +1071,7 @@ int PandarGeneral_Internal::ParseL20Data(HS_LIDAR_L20_Packet *packet, \
     return -1;
   }
 
-  for(block = 0; block < packet->header.chBlockNumber; block ++) {
+  for(block = 0; block < packet->header.chBlockNumber; block++) {
     packet->blocks[block].azimuth = (recvbuf[index]& 0xff) | \
         ((recvbuf[index + 1]& 0xff) << 8);
     index += HS_LIDAR_L20_BLOCK_HEADER_AZIMUTH;
@@ -1627,8 +1627,8 @@ void PandarGeneral_Internal::CalcXTPointXYZIT(HS_LIDAR_XT_Packet *pkt, int block
     if(azimuth > 36000)
       azimuth -= 36000;
     float xyDistance = unit.distance * m_cos_elevation_map_[i];
-    point.x = static_cast<float>(xyDistance * m_sin_azimuth_map_[azimuth]);
-    point.y = static_cast<float>(xyDistance * m_cos_azimuth_map_[azimuth]);
+    //point.x = static_cast<float>(xyDistance * m_sin_azimuth_map_[azimuth]); Commented in order to rotate 90 degrees about z. See modified code below
+    //point.y = static_cast<float>(xyDistance * m_cos_azimuth_map_[azimuth]);
     point.z = static_cast<float>(unit.distance * m_sin_elevation_map_[i]);
 
     point.intensity = unit.intensity;
@@ -1652,6 +1652,37 @@ void PandarGeneral_Internal::CalcXTPointXYZIT(HS_LIDAR_XT_Packet *pkt, int block
       }
     }
 
+    // Modified For Stencil
+    point.y        = static_cast<float>( xyDistance * m_sin_azimuth_map_[azimuth] ); // Rotate points 90 degrees so Lidar frame matches IMU frame
+    point.x        = -static_cast<float>( xyDistance * m_cos_azimuth_map_[azimuth] );
+    point.distance = unit.distance;
+
+    point.azimuth = azimuth / 100.0 - 180.0; // Make azimuth 0 begin on X axis (in front of Lidar)
+    if ( point.azimuth < 0 )
+    {
+       point.azimuth += 360;
+    }
+    point.azimuth = degreeToRadian( point.azimuth );
+
+    point.time = ( ( static_cast<double>( pkt->timestamp ) + static_cast<double>( blockXTOffsetSingle_[blockid] + laserXTOffset_[i] ) ) / 1000000.0 ); // Assuming single return
+
+    //Take System time up to the second then append subsecond portion from registers. Assuming that the timestamp type is set to realtime
+    point.timestamp  = static_cast<double>( static_cast<int>( point.timestamp ) );
+    point.timestamp += point.time;
+
+    // In case of rollover
+    double diff = point.timestamp - m_dPktTimestamp;
+    if ( diff > 0.5 )
+    {
+       point.timestamp -= 1;
+    }
+    else if ( diff < -0.5 )
+    {
+       point.timestamp += 1;
+    }
+
+    // End Modification
+
     point.ring = i;
     if (pcl_type_) {
       PointCloudList[i].push_back(point);
@@ -1674,6 +1705,19 @@ void PandarGeneral_Internal::EmitBackMessege(char chLaserNumber, boost::shared_p
     cld->points.assign(PointCloud.begin(),PointCloud.begin() + iPointCloudIndex);
     cld->width = (uint32_t)cld->points.size();
     cld->height = 1;
+
+    // Modified for Stencil
+
+    // Forcing the first point time to be zero
+    double beginTime = cld->points[0].timestamp;
+
+    for ( auto &i : cld->points )
+    {
+       i.time = i.timestamp - beginTime;
+    }
+
+    // End Modification
+
     iPointCloudIndex = 0;
   }
   pcl_callback_(cld, cld->points[0].timestamp, scan); // the timestamp from first point cloud of cld
@@ -1725,5 +1769,3 @@ void PandarGeneral_Internal::SetEnvironmentVariableTZ(){
     printf("set environment fail\n");
   }
 }
-
-
